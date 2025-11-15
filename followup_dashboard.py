@@ -242,6 +242,7 @@ for (group_name, members), col in zip(GROUPS.items(), cols):
 
         st.write("")
 
+        # 👉 每个成员一块：有自己的输入 + 保存按钮
         for member in members:
             st.markdown(f"**👤 {member}**")
 
@@ -250,6 +251,7 @@ for (group_name, members), col in zip(GROUPS.items(), cols):
             custom_key = f"custom_{group_name}_{member}"
             reset_key = f"reset_{group_name}_{member}"
 
+            # 若上次保存后需要重置输入框
             if st.session_state.get(reset_key, False):
                 if incident_key in st.session_state:
                     st.session_state[incident_key] = ""
@@ -282,6 +284,7 @@ for (group_name, members), col in zip(GROUPS.items(), cols):
                 unsafe_allow_html=True,
             )
 
+            # ✅ 每个人下面都有自己的保存按钮
             if st.button("💾 保存该人员记录", key=f"save_{group_name}_{member}"):
                 entry = {
                     "date": record_date,
@@ -295,8 +298,9 @@ for (group_name, members), col in zip(GROUPS.items(), cols):
                 save_single_entry(entry)
                 st.success(f"✅ 已保存 {member} 在 {record_date} 的记录")
 
+                # 标记需要重置输入框，然后刷新页面
                 st.session_state[reset_key] = True
-                st.experimental_rerun()
+                st.rerun()
 
             st.write("---")
 
@@ -389,10 +393,11 @@ else:
                     f"T: {row.get('tech_followup', '')} | C: {row.get('custom_followup', '')}"
                 )
 
+                # ✅ 每一行自己的删除按钮
                 if row_cols[5].button("🗑️ 删除", key=f"del_{idx}"):
                     delete_record(idx)
                     st.success("记录已删除")
-                    st.experimental_rerun()
+                    st.rerun()
 
     # ---------- 折线图：每条线表示一个组（按日期取该组平均 score） ----------
     chart_src = df_group_filtered.dropna(subset=["date"]).copy()
