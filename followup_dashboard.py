@@ -12,42 +12,85 @@ import altair as alt
 # ===== 新增：数据库相关 =====
 from sqlalchemy import create_engine, text
 
-# 从 secrets 或 环境变量中获取 DB_URL
+# ================== 0. 页面配置 ==================
+st.set_page_config(
+    page_title="跟单监督面板",
+    layout="wide",
+)
+
+st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
+
+# ================== 0.1 存储配置：优先 Supabase，失败退回 CSV ==================
+
+LOG_FILE = "followup_log.csv"  # 退回方案：本地 CSV
 DB_URL = st.secrets.get("DB_URL", os.getenv("DB_URL", ""))
 
-if not DB_URL:
-    st.error("没有找到数据库连接字符串 DB_URL，请先在 .streamlit/secrets.toml 或 Streamlit Cloud Secrets 中配置。")
-    st.stop()
+engine = None
+USE_DB = False  # 当前是否使用数据库
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
-# ===== 立即测试数据库连接（临时调试用） =====
-def _test_db_connection():
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        st.sidebar.success("✅ 成功连接 Supabase 数据库")
-    except Exception as e:
-        # 这里不会泄露密码，只会显示数据库报的英文错误
-        st.sidebar.error("❌ 数据库连接失败，请把下面这段英文发给我：")
-        st.sidebar.code(str(e))
-        st.stop()
 
-_test_db_connection()
-# ===== 调试结束后可以把上面这段删掉 =====
+def ensure_csv_file():
+    """保证 CSV 存在"""
+    if not os.path.exists(LOG_FILE):
+        df = pd.DataFrame(
+            columns=[
+                "date",
+                "group",
+                "member",
+                "incident_number",
+                "tech_followup",
+                "custom_followup",
+                "score",
+            ]
+        )
+        df.to_csv(LOG_FILE, index=False)
+
+
+def _init_storage():
+    """
+    优先尝试连接 Supabase 数据库；
+    - 成功：USE_DB = True
+    - 失败或没有 DB_URL：自动退回 CSV
+    """
+    global engine, USE_DB
+
+    if DB_URL:
+        try:
+            engine = create_engine(DB_URL, pool_pre_ping=True)
+            # 测试一下连接
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            st.sidebar.success("✅ 已连接 Supabase 数据库（云端持久化）")
+            USE_DB = True
+            return
+        except Exception as e:
+            # 连接失败：给出提示，然后走 CSV 方案
+            st.sidebar.warning(
+                "⚠️ 连接 Supabase 数据库失败，已自动切换为本地 CSV 存储。\n\n"
+                f"错误信息：\n{e}"
+            )
+
+    # 没有 DB_URL 或连接失败 → 走 CSV
+    ensure_csv_file()
+    st.sidebar.info("📁 当前使用 CSV 文件 followup_log.csv 存储数据（在云端属于临时存储）。")
+    USE_DB = False
+
+
+_init_storage()
 
 # ================== 1. 基础数据配置 ==================
 
 GROUPS = {
     "The First Group": ["Desiree", "Jessica Dollins"],
     "The Second Group": ["Christie Debrah", "Michelly Maldonado"],
-    "The Third Group": ["Abbigale Lee"],       # 后期你可以在这里加人
+    "The Third Group": ["Abbigale Lee"],  # 后期你可以在这里加人
     "The FOURTH Group": ["Kris Ramsey"],
 }
 
 # 增加 Normal、Blank 选项
 FOLLOWUP_OPTIONS = [
-    "Normal",              # 默认：一切正常（合格）
-    "Blank",               # 空白，也视为不及格
+    "Normal",  # 默认：一切正常（合格）
+    "Blank",  # 空白，也视为不及格
     "Up to date (0 days)",
     "No update for 2 days",
     "No update for 3 days",
@@ -55,11 +98,13 @@ FOLLOWUP_OPTIONS = [
     "No update for 5 days",
 ]
 
-# ================== 1.1 数据访问层：用 Supabase 数据库存 followup_log ==================
+# ================== 1.1 数据访问层：Supabase / CSV 两套实现 ==================
 
 
 def init_db():
-    """在数据库里确保 followup_log 表存在"""
+    """在数据库里确保 followup_log 表存在（仅当 USE_DB=True 时调用）"""
+    if not USE_DB:
+        return
     create_table_sql = """
     CREATE TABLE IF NOT EXISTS followup_log (
         id SERIAL PRIMARY KEY,
@@ -77,27 +122,35 @@ def init_db():
 
 
 def load_log() -> pd.DataFrame:
-    """从数据库读取全部日志，转成 DataFrame，列名与原程序保持一致"""
-    init_db()
-    with engine.begin() as conn:
-        df = pd.read_sql(
-            text(
-                """
-                SELECT
-                    id,
-                    log_date   AS date,
-                    group_name AS "group",
-                    member,
-                    incident_number,
-                    tech_followup,
-                    custom_followup,
-                    score
-                FROM followup_log
-                ORDER BY log_date ASC, id ASC
-                """
-            ),
-            conn,
-        )
+    """
+    读取日志：
+    - 若 USE_DB=True：从 Supabase 读
+    - 否则：读本地 CSV
+    """
+    if USE_DB:
+        init_db()
+        with engine.begin() as conn:
+            df = pd.read_sql(
+                text(
+                    """
+                    SELECT
+                        id,
+                        log_date   AS date,
+                        group_name AS "group",
+                        member,
+                        incident_number,
+                        tech_followup,
+                        custom_followup,
+                        score
+                    FROM followup_log
+                    ORDER BY log_date ASC, id ASC
+                    """
+                ),
+                conn,
+            )
+    else:
+        ensure_csv_file()
+        df = pd.read_csv(LOG_FILE)
 
     if not df.empty and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -105,37 +158,67 @@ def load_log() -> pd.DataFrame:
 
 
 def save_single_entry(entry: dict):
-    """保存单条记录到数据库（每次 INSERT 一行）"""
-    init_db()
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO followup_log
-                    (log_date, group_name, member,
-                     incident_number, tech_followup, custom_followup, score)
-                VALUES
-                    (:log_date, :group_name, :member,
-                     :incident_number, :tech_followup, :custom_followup, :score)
-                """
-            ),
-            {
-                "log_date": entry["date"],
-                "group_name": entry["group"],
-                "member": entry["member"],
-                "incident_number": entry["incident_number"],
-                "tech_followup": entry["tech_followup"],
-                "custom_followup": entry["custom_followup"],
-                "score": entry["score"],
-            },
+    """
+    保存单条记录：
+    - 若 USE_DB=True：INSERT 到 Supabase
+    - 否则：追加写入 CSV
+    """
+    if USE_DB:
+        init_db()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO followup_log
+                        (log_date, group_name, member,
+                         incident_number, tech_followup, custom_followup, score)
+                    VALUES
+                        (:log_date, :group_name, :member,
+                         :incident_number, :tech_followup, :custom_followup, :score)
+                    """
+                ),
+                {
+                    "log_date": entry["date"],
+                    "group_name": entry["group"],
+                    "member": entry["member"],
+                    "incident_number": entry["incident_number"],
+                    "tech_followup": entry["tech_followup"],
+                    "custom_followup": entry["custom_followup"],
+                    "score": entry["score"],
+                },
+            )
+    else:
+        ensure_csv_file()
+        log_df = load_log()
+        new_df = pd.DataFrame([entry])
+        new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
+        final_df = pd.concat([log_df, new_df], ignore_index=True)
+        final_df["date"] = (
+            pd.to_datetime(final_df["date"], errors="coerce")
+            .dt.strftime("%Y-%m-%d")
         )
+        final_df.to_csv(LOG_FILE, index=False)
 
 
 def delete_record(record_id: int):
-    """根据数据库里的 id 删除一条记录"""
-    init_db()
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM followup_log WHERE id = :id"), {"id": record_id})
+    """
+    删除记录：
+    - 若 USE_DB=True：按 id 删除
+    - 否则：按 index 删除（保持原来逻辑）
+    """
+    if USE_DB:
+        init_db()
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM followup_log WHERE id = :id"),
+                {"id": record_id},
+            )
+    else:
+        ensure_csv_file()
+        df = load_log()
+        if record_id in df.index:
+            df = df.drop(record_id)
+            df.to_csv(LOG_FILE, index=False)
 
 
 # ================== 工具函数 ==================
@@ -152,7 +235,7 @@ def parse_days(option: str) -> int:
     if option == "Normal":
         return 0
     if option == "Blank":
-        return 4   # ⭐ Blank 当作 4 天未更新
+        return 4  # ⭐ Blank 当作 4 天未更新
     if "No update for" in option:
         try:
             return int(option.split("for")[1].split("days")[0].strip())
@@ -173,14 +256,7 @@ def calc_score(tech_option: str, custom_option: str) -> int:
     return -max_days
 
 
-# ================== 2. Streamlit 页面布局 ==================
-
-st.set_page_config(
-    page_title="跟单监督面板",
-    layout="wide",
-)
-
-st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
+# ================== 2. 页面主逻辑 ==================
 
 # 选择记录日期（默认今天）
 record_date = st.date_input("📅 记录日期（通常选今天）", value=date.today())
@@ -417,7 +493,7 @@ else:
         else:
             display_df = df_for_detail.copy()
 
-            # 按日期 + id 排序：最新在上
+            # 若有 id（数据库模式），则按 date+id 排序；否则按 date
             if "id" in display_df.columns:
                 display_df = display_df.sort_values(
                     by=["date", "id"],
@@ -439,7 +515,7 @@ else:
             header_cols[4].markdown("**状态(Tech / Customer)**")
             header_cols[5].markdown("**操作**")
 
-            for _, row in display_df.iterrows():
+            for idx, row in display_df.iterrows():
                 row_cols = st.columns([2, 3, 3, 3, 3, 1])
 
                 date_str = "" if pd.isna(row["date"]) else row["date"].strftime(
@@ -454,15 +530,16 @@ else:
                     f"T: {row.get('tech_followup', '')} | C: {row.get('custom_followup', '')}"
                 )
 
-                rec_id = int(row.get("id")) if "id" in row and pd.notna(row["id"]) else None
-
-                if rec_id is not None:
-                    if row_cols[5].button("🗑️ 删除", key=f"del_{rec_id}"):
-                        delete_record(rec_id)
-                        st.success("记录已删除")
-                        st.rerun()
+                # 数据库模式：用 id 删除；CSV 模式：用 index 删除
+                if USE_DB and "id" in display_df.columns and pd.notna(row.get("id")):
+                    rec_id = int(row.get("id"))
                 else:
-                    row_cols[5].write("-")
+                    rec_id = int(idx)
+
+                if row_cols[5].button("🗑️ 删除", key=f"del_{rec_id}"):
+                    delete_record(rec_id)
+                    st.success("记录已删除")
+                    st.rerun()
 
     # ---------- 折线图：每条线表示一个组（按日期取该组平均 score） ----------
     chart_src = df_group_filtered.dropna(subset=["date"]).copy()
