@@ -20,6 +20,20 @@ if not DB_URL:
     st.stop()
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
+# ===== 立即测试数据库连接（临时调试用） =====
+def _test_db_connection():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        st.sidebar.success("✅ 成功连接 Supabase 数据库")
+    except Exception as e:
+        # 这里不会泄露密码，只会显示数据库报的英文错误
+        st.sidebar.error("❌ 数据库连接失败，请把下面这段英文发给我：")
+        st.sidebar.code(str(e))
+        st.stop()
+
+_test_db_connection()
+# ===== 调试结束后可以把上面这段删掉 =====
 
 # ================== 1. 基础数据配置 ==================
 
