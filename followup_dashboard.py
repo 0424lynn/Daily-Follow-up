@@ -30,7 +30,7 @@ USE_DB = False  # 当前是否使用数据库
 
 
 def ensure_csv_file():
-    """保证 CSV 存在"""
+    """保证 CSV 文件存在，列名与数据库结构一致。"""
     if not os.path.exists(LOG_FILE):
         df = pd.DataFrame(
             columns=[
@@ -121,36 +121,57 @@ def init_db():
         conn.execute(text(create_table_sql))
 
 
+def _load_from_db() -> pd.DataFrame:
+    """从 Supabase 读取日志，列名转成前端统一的 date / group。"""
+    init_db()
+    with engine.begin() as conn:
+        df = pd.read_sql(
+            text(
+                """
+                SELECT
+                    id,
+                    log_date   AS date,
+                    group_name AS "group",
+                    member,
+                    incident_number,
+                    tech_followup,
+                    custom_followup,
+                    score
+                FROM followup_log
+                ORDER BY log_date ASC, id ASC
+                """
+            ),
+            conn,
+        )
+    return df
+
+
+def _load_from_csv() -> pd.DataFrame:
+    """从 CSV 读取日志，并兼容旧版本列名（date / group）。"""
+    ensure_csv_file()
+    df = pd.read_csv(LOG_FILE)
+
+    # 旧版本兼容：如果是 date / group，就先统一成新结构再用
+    if "log_date" not in df.columns and "date" in df.columns:
+        # 旧文件：date / group → 新结构
+        df = df.rename(columns={"date": "log_date", "group": "group_name"})
+
+    # 统一对外暴露为 date / group，方便后面代码使用
+    df = df.rename(columns={"log_date": "date", "group_name": "group"})
+    return df
+
+
 def load_log() -> pd.DataFrame:
     """
     读取日志：
     - 若 USE_DB=True：从 Supabase 读
     - 否则：读本地 CSV
+    返回的 df 中，统一有字段：date, group, member, incident_number, tech_followup, custom_followup, score
     """
     if USE_DB:
-        init_db()
-        with engine.begin() as conn:
-            df = pd.read_sql(
-                text(
-                    """
-                    SELECT
-                        id,
-                        log_date   AS date,
-                        group_name AS "group",
-                        member,
-                        incident_number,
-                        tech_followup,
-                        custom_followup,
-                        score
-                    FROM followup_log
-                    ORDER BY log_date ASC, id ASC
-                    """
-                ),
-                conn,
-            )
+        df = _load_from_db()
     else:
-        ensure_csv_file()
-        df = pd.read_csv(LOG_FILE)
+        df = _load_from_csv()
 
     if not df.empty and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -160,8 +181,9 @@ def load_log() -> pd.DataFrame:
 def save_single_entry(entry: dict):
     """
     保存单条记录：
-    - 若 USE_DB=True：INSERT 到 Supabase
-    - 否则：追加写入 CSV
+    - 若 USE_DB=True：INSERT 到 Supabase（log_date / group_name）
+    - 否则：追加写入 CSV（列名与 DB 保持一致）
+    entry 里的字段是前端统一格式：date / group / member / incident_number / tech_followup / custom_followup / score
     """
     if USE_DB:
         init_db()
@@ -189,14 +211,33 @@ def save_single_entry(entry: dict):
             )
     else:
         ensure_csv_file()
-        log_df = load_log()
-        new_df = pd.DataFrame([entry])
-        new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
-        final_df = pd.concat([log_df, new_df], ignore_index=True)
-        final_df["date"] = (
-            pd.to_datetime(final_df["date"], errors="coerce")
-            .dt.strftime("%Y-%m-%d")
+        # 先读出原 CSV，并统一成新结构列名
+        raw_df = pd.read_csv(LOG_FILE)
+        if "log_date" not in raw_df.columns and "date" in raw_df.columns:
+            raw_df = raw_df.rename(columns={"date": "log_date", "group": "group_name"})
+
+        # 新记录用新结构列名
+        new_row = pd.DataFrame(
+            [
+                {
+                    "log_date": entry["date"],
+                    "group_name": entry["group"],
+                    "member": entry["member"],
+                    "incident_number": entry["incident_number"],
+                    "tech_followup": entry["tech_followup"],
+                    "custom_followup": entry["custom_followup"],
+                    "score": entry["score"],
+                }
+            ]
         )
+
+        # 合并并保存
+        final_df = pd.concat([raw_df, new_row], ignore_index=True)
+        # 确保日期列是字符串格式
+        if "log_date" in final_df.columns:
+            final_df["log_date"] = pd.to_datetime(
+                final_df["log_date"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
         final_df.to_csv(LOG_FILE, index=False)
 
 
@@ -215,10 +256,17 @@ def delete_record(record_id: int):
             )
     else:
         ensure_csv_file()
-        df = load_log()
+        df = _load_from_csv()
+        # 注意：_load_from_csv 已经把 log_date/group_name 重命名为 date/group
         if record_id in df.index:
             df = df.drop(record_id)
-            df.to_csv(LOG_FILE, index=False)
+            # 保存时需要再改回物理列名
+            out_df = df.rename(columns={"date": "log_date", "group": "group_name"})
+            if "log_date" in out_df.columns:
+                out_df["log_date"] = pd.to_datetime(
+                    out_df["log_date"], errors="coerce"
+                ).dt.strftime("%Y-%m-%d")
+            out_df.to_csv(LOG_FILE, index=False)
 
 
 # ================== 工具函数 ==================
