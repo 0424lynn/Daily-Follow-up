@@ -34,8 +34,8 @@ def ensure_csv_file():
     if not os.path.exists(LOG_FILE):
         df = pd.DataFrame(
             columns=[
-                "date",
-                "group",
+                "log_date",
+                "group_name",
                 "member",
                 "incident_number",
                 "tech_followup",
