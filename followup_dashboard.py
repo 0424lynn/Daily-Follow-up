@@ -9,7 +9,17 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-LOG_FILE = "followup_log.csv"
+# ===== 新增：数据库相关 =====
+from sqlalchemy import create_engine, text
+
+# 从 secrets 或 环境变量中获取 DB_URL
+DB_URL = st.secrets.get("DB_URL", os.getenv("DB_URL", ""))
+
+if not DB_URL:
+    st.error("没有找到数据库连接字符串 DB_URL，请先在 .streamlit/secrets.toml 或 Streamlit Cloud Secrets 中配置。")
+    st.stop()
+
+engine = create_engine(DB_URL, pool_pre_ping=True)
 
 # ================== 1. 基础数据配置 ==================
 
@@ -31,28 +41,90 @@ FOLLOWUP_OPTIONS = [
     "No update for 5 days",
 ]
 
+# ================== 1.1 数据访问层：用 Supabase 数据库存 followup_log ==================
 
-def ensure_log_file():
-    """保证日志文件存在；若不存在则创建空表头"""
-    if not os.path.exists(LOG_FILE):
-        df = pd.DataFrame(
-            columns=[
-                "date", "group", "member",
-                "incident_number",
-                "tech_followup", "custom_followup",
-                "score",
-            ]
-        )
-        df.to_csv(LOG_FILE, index=False)
+
+def init_db():
+    """在数据库里确保 followup_log 表存在"""
+    create_table_sql = """
+    CREATE TABLE IF NOT EXISTS followup_log (
+        id SERIAL PRIMARY KEY,
+        log_date DATE,
+        group_name VARCHAR(100),
+        member VARCHAR(100),
+        incident_number TEXT,
+        tech_followup VARCHAR(50),
+        custom_followup VARCHAR(50),
+        score INTEGER
+    );
+    """
+    with engine.begin() as conn:
+        conn.execute(text(create_table_sql))
 
 
 def load_log() -> pd.DataFrame:
-    """读取日志并确保 date 列是 datetime 类型"""
-    ensure_log_file()
-    df = pd.read_csv(LOG_FILE)
+    """从数据库读取全部日志，转成 DataFrame，列名与原程序保持一致"""
+    init_db()
+    with engine.begin() as conn:
+        df = pd.read_sql(
+            text(
+                """
+                SELECT
+                    id,
+                    log_date   AS date,
+                    group_name AS "group",
+                    member,
+                    incident_number,
+                    tech_followup,
+                    custom_followup,
+                    score
+                FROM followup_log
+                ORDER BY log_date ASC, id ASC
+                """
+            ),
+            conn,
+        )
+
     if not df.empty and "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
+
+
+def save_single_entry(entry: dict):
+    """保存单条记录到数据库（每次 INSERT 一行）"""
+    init_db()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO followup_log
+                    (log_date, group_name, member,
+                     incident_number, tech_followup, custom_followup, score)
+                VALUES
+                    (:log_date, :group_name, :member,
+                     :incident_number, :tech_followup, :custom_followup, :score)
+                """
+            ),
+            {
+                "log_date": entry["date"],
+                "group_name": entry["group"],
+                "member": entry["member"],
+                "incident_number": entry["incident_number"],
+                "tech_followup": entry["tech_followup"],
+                "custom_followup": entry["custom_followup"],
+                "score": entry["score"],
+            },
+        )
+
+
+def delete_record(record_id: int):
+    """根据数据库里的 id 删除一条记录"""
+    init_db()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM followup_log WHERE id = :id"), {"id": record_id})
+
+
+# ================== 工具函数 ==================
 
 
 def parse_days(option: str) -> int:
@@ -85,32 +157,6 @@ def calc_score(tech_option: str, custom_option: str) -> int:
     days_custom = parse_days(custom_option)
     max_days = max(days_tech, days_custom)
     return -max_days
-
-
-def save_single_entry(entry: dict):
-    """
-    保存单条记录：
-    - 不覆盖任何旧记录，每次保存都往后追加一行
-    - 保存前统一规范所有日期为 'YYYY-MM-DD' 字符串
-    """
-    log_df = load_log()
-
-    new_df = pd.DataFrame([entry])
-    new_df["date"] = pd.to_datetime(new_df["date"], errors="coerce")
-
-    final_df = pd.concat([log_df, new_df], ignore_index=True)
-    final_df["date"] = pd.to_datetime(final_df["date"], errors="coerce").dt.strftime(
-        "%Y-%m-%d"
-    )
-    final_df.to_csv(LOG_FILE, index=False)
-
-
-def delete_record(index_to_delete):
-    """根据 DataFrame 的 index 删除一条记录"""
-    df = load_log()
-    if index_to_delete in df.index:
-        df = df.drop(index_to_delete)
-        df.to_csv(LOG_FILE, index=False)
 
 
 # ================== 2. Streamlit 页面布局 ==================
@@ -357,18 +403,19 @@ else:
         else:
             display_df = df_for_detail.copy()
 
-            # 创建 index 列（保存录入顺序）
-            display_df["__idx"] = display_df.index
-
-            # 排序：日期最新在上，同一天内最新录入在上
-            display_df = display_df.sort_values(
-                by=["date", "__idx"],
-                ascending=[False, False],
-                na_position="last",
-            )
-
-            # 不显示内部排序字段
-            display_df = display_df.drop(columns=["__idx"])
+            # 按日期 + id 排序：最新在上
+            if "id" in display_df.columns:
+                display_df = display_df.sort_values(
+                    by=["date", "id"],
+                    ascending=[False, False],
+                    na_position="last",
+                )
+            else:
+                display_df = display_df.sort_values(
+                    by=["date"],
+                    ascending=[False],
+                    na_position="last",
+                )
 
             header_cols = st.columns([2, 3, 3, 3, 3, 1])
             header_cols[0].markdown("**日期**")
@@ -378,7 +425,7 @@ else:
             header_cols[4].markdown("**状态(Tech / Customer)**")
             header_cols[5].markdown("**操作**")
 
-            for idx, row in display_df.iterrows():
+            for _, row in display_df.iterrows():
                 row_cols = st.columns([2, 3, 3, 3, 3, 1])
 
                 date_str = "" if pd.isna(row["date"]) else row["date"].strftime(
@@ -393,11 +440,15 @@ else:
                     f"T: {row.get('tech_followup', '')} | C: {row.get('custom_followup', '')}"
                 )
 
-                # ✅ 每一行自己的删除按钮
-                if row_cols[5].button("🗑️ 删除", key=f"del_{idx}"):
-                    delete_record(idx)
-                    st.success("记录已删除")
-                    st.rerun()
+                rec_id = int(row.get("id")) if "id" in row and pd.notna(row["id"]) else None
+
+                if rec_id is not None:
+                    if row_cols[5].button("🗑️ 删除", key=f"del_{rec_id}"):
+                        delete_record(rec_id)
+                        st.success("记录已删除")
+                        st.rerun()
+                else:
+                    row_cols[5].write("-")
 
     # ---------- 折线图：每条线表示一个组（按日期取该组平均 score） ----------
     chart_src = df_group_filtered.dropna(subset=["date"]).copy()
