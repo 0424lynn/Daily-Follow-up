@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # 跟单组监督系统（Streamlit + Python）
 # 记录每个组、每个跟单员的每日跟进情况，并可视化趋势
-import json
+
 from datetime import date, datetime
 
 import pandas as pd
@@ -20,9 +20,64 @@ st.set_page_config(
 st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
 # ================== 0.1 Google Sheet 存储配置 ==================
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-@st.cache_data
+
+
+def get_gsheet_worksheet():
+    """
+    初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
+    第一次运行时，如果没有这个工作表，会自动创建并写入表头。
+    """
+
+    # 1) 从 secrets 里读取 service account 配置（TOML 表）
+    if "GCP_SERVICE_ACCOUNT_JSON" not in st.secrets:
+        st.error("❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。")
+        st.stop()
+
+    sa_conf = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]  # dict-like
+    service_account_info = dict(sa_conf)
+
+    # 2) 读取表 ID
+    sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "").strip()
+    if not sheet_id:
+        st.error("❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。")
+        st.stop()
+
+    # 3) 创建凭证
+    creds = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES,
+    )
+
+    # 4) 连接 Google Sheets
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(sheet_id)
+
+    # 5) 尝试获取名为 "log" 的工作表，没有就创建
+    try:
+        ws = sh.worksheet("log")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="log", rows=1000, cols=7)
+        ws.append_row(
+            [
+                "date",
+                "group",
+                "member",
+                "incident_number",
+                "tech_followup",
+                "custom_followup",
+                "score",
+            ]
+        )
+    return ws
+
+
 def load_log() -> pd.DataFrame:
+    """
+    从 Google Sheet 读取全部日志数据。
+    返回字段：date, group, member, incident_number, tech_followup, custom_followup, score
+    """
     ws = get_gsheet_worksheet()
     try:
         records = ws.get_all_records()
@@ -40,11 +95,12 @@ def load_log() -> pd.DataFrame:
         "score",
     ]
 
-
     if not records:
         return pd.DataFrame(columns=base_cols)
 
     df = pd.DataFrame.from_records(records)
+
+    # 确保这些列都存在
     for c in base_cols:
         if c not in df.columns:
             df[c] = pd.NA
@@ -53,6 +109,7 @@ def load_log() -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
     return df
+
 
 def save_single_entry(entry: dict):
     """
