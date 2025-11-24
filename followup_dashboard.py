@@ -23,8 +23,6 @@ st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-
-@st.cache_resource
 def get_gsheet_worksheet():
     """
     初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
