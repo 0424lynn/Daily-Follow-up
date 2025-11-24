@@ -40,8 +40,6 @@ def load_log() -> pd.DataFrame:
         "score",
     ]
 
-    # 🔴 这行可以删掉 / 注释掉
-    # st.sidebar.info(f"📄 Google Sheet 读取到 {len(records)} 条记录")
 
     if not records:
         return pd.DataFrame(columns=base_cols)
@@ -55,7 +53,6 @@ def load_log() -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
     return df
-
 
 def save_single_entry(entry: dict):
     """
