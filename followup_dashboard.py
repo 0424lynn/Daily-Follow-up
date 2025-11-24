@@ -86,9 +86,6 @@ def load_log() -> pd.DataFrame:
         "score",
     ]
 
-    # 👉 调试信息：看一下实际读到了几条记录
-    st.sidebar.info(f"📄 Google Sheet 读取到 {len(records)} 条记录")
-
     # 没有任何数据行：返回“有列名但 0 行”的空 df
     if not records:
         return pd.DataFrame(columns=base_cols)
