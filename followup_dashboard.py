@@ -73,16 +73,14 @@ def get_gsheet_worksheet():
     return ws
 
 
-@st.cache_data
 def load_log() -> pd.DataFrame:
     """
     从 Google Sheet 读取全部日志数据。
-    永远保证返回的 df 至少包含这些列：
-    date, group, member, incident_number, tech_followup, custom_followup, score
+    返回字段：date, group, member, incident_number, tech_followup, custom_followup, score
     """
     ws = get_gsheet_worksheet()
     try:
-        records = ws.get_all_records()  # 每行是一个 dict（自动跳过表头行）
+        records = ws.get_all_records()
     except Exception as e:
         st.sidebar.error(f"读取 Google Sheet 失败：{e}")
         records = []
@@ -97,13 +95,12 @@ def load_log() -> pd.DataFrame:
         "score",
     ]
 
-    # 没有任何数据行：返回“有列名但 0 行”的空 df
     if not records:
         return pd.DataFrame(columns=base_cols)
 
     df = pd.DataFrame.from_records(records)
 
-    # 万一某些列缺失，补上
+    # 确保这些列都存在
     for c in base_cols:
         if c not in df.columns:
             df[c] = pd.NA
