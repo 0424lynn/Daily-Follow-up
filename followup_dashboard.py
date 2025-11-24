@@ -25,61 +25,40 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 @st.cache_resource
 def get_gsheet_worksheet():
-    """
-    初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
-    第一次运行时，如果没有这个工作表，会自动创建并写入表头。
-    这里直接读取 Streamlit Secrets 里的 TOML 配置，
-    不再使用 json.loads。
-    """
-    # 1) 先检查 secrets 里有没有这两个 key，顺便把所有 key 打出来方便你调试
-    secrets_keys = list(st.secrets.keys())
+    # 调试：看看当前到底有哪些 secrets key
+    st.sidebar.write("Secrets keys:", list(st.secrets.keys()))
 
-    if "GCP_SERVICE_ACCOUNT_JSON" not in secrets_keys:
-        st.sidebar.error(
-            f"❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。\n"
-            f"当前 secrets keys: {secrets_keys}"
+    try:
+        sa_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    except KeyError:
+        st.error(
+            f"❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。当前 secrets keys: {list(st.secrets.keys())}"
         )
         st.stop()
 
-    # 从 TOML 子表读取字典；st.secrets["GCP_SERVICE_ACCOUNT_JSON"] 本身就是一个 dict-like
-    service_account_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
-
-    # 2) 创建凭证
-    creds = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=SCOPES,
-    )
-
-    # 3) 读取表 ID（就是你那串 1cEtxJ...）
-    sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "").strip()
-    if not sheet_id:
-        st.sidebar.error(
-            f"❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。\n"
-            f"当前 secrets keys: {secrets_keys}"
+    try:
+        sheet_id = st.secrets["GSHEET_SPREADSHEET_ID"]
+    except KeyError:
+        st.error(
+            f"❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。当前 secrets keys: {list(st.secrets.keys())}"
         )
         st.stop()
 
-    # 4) 连接 Google Sheets
+    creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
     client = gspread.authorize(creds)
     sh = client.open_by_key(sheet_id)
 
-    # 5) 尝试获取名为 "log" 的工作表，没有就创建
     try:
         ws = sh.worksheet("log")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="log", rows=1000, cols=7)
         ws.append_row(
-            [
-                "date",
-                "group",
-                "member",
-                "incident_number",
-                "tech_followup",
-                "custom_followup",
-                "score",
-            ]
+            ["date", "group", "member",
+             "incident_number", "tech_followup",
+             "custom_followup", "score"]
         )
     return ws
+
 
 
 @st.cache_data
