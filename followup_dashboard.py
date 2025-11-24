@@ -64,17 +64,43 @@ def get_gsheet_worksheet():
     return ws
 
 
+@st.cache_data
 def load_log() -> pd.DataFrame:
     """
     从 Google Sheet 读取全部日志数据。
-    返回字段：date, group, member, incident_number, tech_followup, custom_followup, score
+    永远保证返回的 df 至少包含这些列：
+    date, group, member, incident_number, tech_followup, custom_followup, score
     """
     ws = get_gsheet_worksheet()
-    records = ws.get_all_records()  # 每行是一个 dict（自动跳过表头行）
+    try:
+        records = ws.get_all_records()  # 每行是一个 dict（自动跳过表头行）
+    except Exception:
+        records = []
+
+    # 如果还没有任何数据行，返回一个“有列名但没有行”的空表，避免 KeyError
+    base_cols = [
+        "date",
+        "group",
+        "member",
+        "incident_number",
+        "tech_followup",
+        "custom_followup",
+        "score",
+    ]
+
+    if not records:
+        return pd.DataFrame(columns=base_cols)
+
     df = pd.DataFrame(records)
 
-    if not df.empty and "date" in df.columns:
+    # 万一列名不全，缺哪个补哪个
+    for c in base_cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
     return df
 
 
