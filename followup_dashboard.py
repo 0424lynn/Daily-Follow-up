@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 # 跟单组监督系统（Streamlit + Python）
 # 记录每个组、每个跟单员的每日跟进情况，并可视化趋势
-
-import os
-from datetime import date
+import json
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 import altair as alt
 
-# ===== 新增：数据库相关 =====
-from sqlalchemy import create_engine, text
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ================== 0. 页面配置 ==================
 st.set_page_config(
@@ -20,22 +19,41 @@ st.set_page_config(
 
 st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
-# ================== 0.1 存储配置：优先 Supabase，失败退回 CSV ==================
+# ================== 0.1 Google Sheet 存储配置 ==================
 
-LOG_FILE ="followup_log.csv"
-DB_URL = st.secrets.get("DB_URL", os.getenv("DB_URL", ""))
-
-engine = None
-USE_DB = False  # 当前是否使用数据库
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-def ensure_csv_file():
-    """保证 CSV 文件存在，列名与数据库结构一致。"""
-    if not os.path.exists(LOG_FILE):
-        df = pd.DataFrame(
-            columns=[
-                "log_date",
-                "group_name",
+@st.cache_resource
+def get_gsheet_worksheet():
+    """
+    初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
+    第一次运行时，如果没有这个工作表，会自动创建并写入表头。
+    """
+    # 1) 从 secrets 里读取 service account JSON
+    service_account_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+
+    # 2) 创建凭证
+    creds = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES,
+    )
+
+    # 3) 连接 Google Sheets
+    client = gspread.authorize(creds)
+    sheet_id = st.secrets["GSHEET_SPREADSHEET_ID"]
+    sh = client.open_by_key(sheet_id)
+
+    # 4) 尝试获取名为 "log" 的工作表，没有就创建
+    try:
+        ws = sh.worksheet("log")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="log", rows=1000, cols=7)
+        # 写表头
+        ws.append_row(
+            [
+                "date",
+                "group",
                 "member",
                 "incident_number",
                 "tech_followup",
@@ -43,40 +61,64 @@ def ensure_csv_file():
                 "score",
             ]
         )
-        df.to_csv(LOG_FILE, index=False)
+    return ws
 
 
-def _init_storage():
+def load_log() -> pd.DataFrame:
     """
-    优先尝试连接 Supabase 数据库；
-    - 成功：USE_DB = True
-    - 失败或没有 DB_URL：自动退回 CSV
+    从 Google Sheet 读取全部日志数据。
+    返回字段：date, group, member, incident_number, tech_followup, custom_followup, score
     """
-    global engine, USE_DB
+    ws = get_gsheet_worksheet()
+    records = ws.get_all_records()  # 每行是一个 dict（自动跳过表头行）
+    df = pd.DataFrame(records)
 
-    if DB_URL:
-        try:
-            engine = create_engine(DB_URL, pool_pre_ping=True)
-            # 测试一下连接
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            st.sidebar.success("✅ 已连接 Supabase 数据库（云端持久化）")
-            USE_DB = True
-            return
-        except Exception as e:
-            # 连接失败：给出提示，然后走 CSV 方案
-            st.sidebar.warning(
-                "⚠️ 连接 Supabase 数据库失败，已自动切换为本地 CSV 存储。\n\n"
-                f"错误信息：\n{e}"
-            )
-
-    # 没有 DB_URL 或连接失败 → 走 CSV
-    ensure_csv_file()
-    st.sidebar.info("📁 当前使用 CSV 文件 followup_log.csv 存储数据（在云端属于临时存储）。")
-    USE_DB = False
+    if not df.empty and "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return df
 
 
-_init_storage()
+def save_single_entry(entry: dict):
+    """
+    保存单条记录到 Google Sheet（追加一行）。
+    entry 字段：
+        date, group, member, incident_number, tech_followup, custom_followup, score
+    """
+    ws = get_gsheet_worksheet()
+
+    d = entry.copy()
+    if isinstance(d["date"], (datetime, date)):
+        d["date"] = d["date"].strftime("%Y-%m-%d")
+    else:
+        d["date"] = str(d["date"])
+
+    row = [
+        d.get("date", ""),
+        d.get("group", ""),
+        d.get("member", ""),
+        d.get("incident_number", ""),
+        d.get("tech_followup", ""),
+        d.get("custom_followup", ""),
+        int(d.get("score", 0)),
+    ]
+
+    ws.append_row(row)
+
+
+def delete_record(idx_in_df: int):
+    """
+    根据 DataFrame 的 index 删除一条记录。
+    注意：
+    - get_all_records() 返回的是从表格第 2 行开始的数据（第 1 行是表头）
+    - DataFrame 的 index 0 对应表格第 2 行，以此类推
+    """
+    ws = get_gsheet_worksheet()
+    try:
+        sheet_row = int(idx_in_df) + 2  # +1 因为 index 从 0；再 +1 跳过表头
+        ws.delete_rows(sheet_row)
+    except Exception as e:
+        st.warning(f"删除记录时出错：{e}")
+
 
 # ================== 1. 基础数据配置 ==================
 
@@ -97,176 +139,6 @@ FOLLOWUP_OPTIONS = [
     "No update for 4 days",
     "No update for 5 days",
 ]
-
-# ================== 1.1 数据访问层：Supabase / CSV 两套实现 ==================
-
-
-def init_db():
-    """在数据库里确保 followup_log 表存在（仅当 USE_DB=True 时调用）"""
-    if not USE_DB:
-        return
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS followup_log (
-        id SERIAL PRIMARY KEY,
-        log_date DATE,
-        group_name VARCHAR(100),
-        member VARCHAR(100),
-        incident_number TEXT,
-        tech_followup VARCHAR(50),
-        custom_followup VARCHAR(50),
-        score INTEGER
-    );
-    """
-    with engine.begin() as conn:
-        conn.execute(text(create_table_sql))
-
-
-def _load_from_db() -> pd.DataFrame:
-    """从 Supabase 读取日志，列名转成前端统一的 date / group。"""
-    init_db()
-    with engine.begin() as conn:
-        df = pd.read_sql(
-            text(
-                """
-                SELECT
-                    id,
-                    log_date   AS date,
-                    group_name AS "group",
-                    member,
-                    incident_number,
-                    tech_followup,
-                    custom_followup,
-                    score
-                FROM followup_log
-                ORDER BY log_date ASC, id ASC
-                """
-            ),
-            conn,
-        )
-    return df
-
-
-def _load_from_csv() -> pd.DataFrame:
-    """从 CSV 读取日志，并兼容旧版本列名（date / group）。"""
-    ensure_csv_file()
-    df = pd.read_csv(LOG_FILE)
-
-    # 旧版本兼容：如果是 date / group，就先统一成新结构再用
-    if "log_date" not in df.columns and "date" in df.columns:
-        # 旧文件：date / group → 新结构
-        df = df.rename(columns={"date": "log_date", "group": "group_name"})
-
-    # 统一对外暴露为 date / group，方便后面代码使用
-    df = df.rename(columns={"log_date": "date", "group_name": "group"})
-    return df
-
-
-def load_log() -> pd.DataFrame:
-    """
-    读取日志：
-    - 若 USE_DB=True：从 Supabase 读
-    - 否则：读本地 CSV
-    返回的 df 中，统一有字段：date, group, member, incident_number, tech_followup, custom_followup, score
-    """
-    if USE_DB:
-        df = _load_from_db()
-    else:
-        df = _load_from_csv()
-
-    if not df.empty and "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df
-
-
-def save_single_entry(entry: dict):
-    """
-    保存单条记录：
-    - 若 USE_DB=True：INSERT 到 Supabase（log_date / group_name）
-    - 否则：追加写入 CSV（列名与 DB 保持一致）
-    entry 里的字段是前端统一格式：date / group / member / incident_number / tech_followup / custom_followup / score
-    """
-    if USE_DB:
-        init_db()
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO followup_log
-                        (log_date, group_name, member,
-                         incident_number, tech_followup, custom_followup, score)
-                    VALUES
-                        (:log_date, :group_name, :member,
-                         :incident_number, :tech_followup, :custom_followup, :score)
-                    """
-                ),
-                {
-                    "log_date": entry["date"],
-                    "group_name": entry["group"],
-                    "member": entry["member"],
-                    "incident_number": entry["incident_number"],
-                    "tech_followup": entry["tech_followup"],
-                    "custom_followup": entry["custom_followup"],
-                    "score": entry["score"],
-                },
-            )
-    else:
-        ensure_csv_file()
-        # 先读出原 CSV，并统一成新结构列名
-        raw_df = pd.read_csv(LOG_FILE)
-        if "log_date" not in raw_df.columns and "date" in raw_df.columns:
-            raw_df = raw_df.rename(columns={"date": "log_date", "group": "group_name"})
-
-        # 新记录用新结构列名
-        new_row = pd.DataFrame(
-            [
-                {
-                    "log_date": entry["date"],
-                    "group_name": entry["group"],
-                    "member": entry["member"],
-                    "incident_number": entry["incident_number"],
-                    "tech_followup": entry["tech_followup"],
-                    "custom_followup": entry["custom_followup"],
-                    "score": entry["score"],
-                }
-            ]
-        )
-
-        # 合并并保存
-        final_df = pd.concat([raw_df, new_row], ignore_index=True)
-        # 确保日期列是字符串格式
-        if "log_date" in final_df.columns:
-            final_df["log_date"] = pd.to_datetime(
-                final_df["log_date"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d")
-        final_df.to_csv(LOG_FILE, index=False)
-
-
-def delete_record(record_id: int):
-    """
-    删除记录：
-    - 若 USE_DB=True：按 id 删除
-    - 否则：按 index 删除（保持原来逻辑）
-    """
-    if USE_DB:
-        init_db()
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM followup_log WHERE id = :id"),
-                {"id": record_id},
-            )
-    else:
-        ensure_csv_file()
-        df = _load_from_csv()
-        # 注意：_load_from_csv 已经把 log_date/group_name 重命名为 date/group
-        if record_id in df.index:
-            df = df.drop(record_id)
-            # 保存时需要再改回物理列名
-            out_df = df.rename(columns={"date": "log_date", "group": "group_name"})
-            if "log_date" in out_df.columns:
-                out_df["log_date"] = pd.to_datetime(
-                    out_df["log_date"], errors="coerce"
-                ).dt.strftime("%Y-%m-%d")
-            out_df.to_csv(LOG_FILE, index=False)
 
 
 # ================== 工具函数 ==================
@@ -541,19 +413,13 @@ else:
         else:
             display_df = df_for_detail.copy()
 
-            # 若有 id（数据库模式），则按 date+id 排序；否则按 date
-            if "id" in display_df.columns:
-                display_df = display_df.sort_values(
-                    by=["date", "id"],
-                    ascending=[False, False],
-                    na_position="last",
-                )
-            else:
-                display_df = display_df.sort_values(
-                    by=["date"],
-                    ascending=[False],
-                    na_position="last",
-                )
+            # 按日期+原始 index 排序（越新越上）
+            display_df["__idx"] = display_df.index
+            display_df = display_df.sort_values(
+                by=["date", "__idx"],
+                ascending=[False, False],
+                na_position="last",
+            )
 
             header_cols = st.columns([2, 3, 3, 3, 3, 1])
             header_cols[0].markdown("**日期**")
@@ -578,14 +444,11 @@ else:
                     f"T: {row.get('tech_followup', '')} | C: {row.get('custom_followup', '')}"
                 )
 
-                # 数据库模式：用 id 删除；CSV 模式：用 index 删除
-                if USE_DB and "id" in display_df.columns and pd.notna(row.get("id")):
-                    rec_id = int(row.get("id"))
-                else:
-                    rec_id = int(idx)
+                # 删除时使用原始 index（__idx）
+                rec_idx = int(row["__idx"])
 
-                if row_cols[5].button("🗑️ 删除", key=f"del_{rec_id}"):
-                    delete_record(rec_id)
+                if row_cols[5].button("🗑️ 删除", key=f"del_{rec_idx}"):
+                    delete_record(rec_idx)
                     st.success("记录已删除")
                     st.rerun()
 
