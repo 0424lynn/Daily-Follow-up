@@ -22,7 +22,7 @@ st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
 # ================== 0.1 存储配置：优先 Supabase，失败退回 CSV ==================
 
-LOG_FILE ="/data/followup_log.csv"
+LOG_FILE ="followup_log.csv"
 DB_URL = st.secrets.get("DB_URL", os.getenv("DB_URL", ""))
 
 engine = None
