@@ -23,32 +23,41 @@ st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-
+@st.cache_resource
 def get_gsheet_worksheet():
     """
     初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
     第一次运行时，如果没有这个工作表，会自动创建并写入表头。
+    这里直接读取 Streamlit Secrets 里的 TOML 配置，
+    不再使用 json.loads。
     """
+    # 1) 先检查 secrets 里有没有这两个 key，顺便把所有 key 打出来方便你调试
+    secrets_keys = list(st.secrets.keys())
 
-    # 1) 从 secrets 里读取 service account 配置（TOML 表）
-    if "GCP_SERVICE_ACCOUNT_JSON" not in st.secrets:
-        st.error("❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。")
+    if "GCP_SERVICE_ACCOUNT_JSON" not in secrets_keys:
+        st.sidebar.error(
+            f"❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。\n"
+            f"当前 secrets keys: {secrets_keys}"
+        )
         st.stop()
 
-    sa_conf = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]  # dict-like
-    service_account_info = dict(sa_conf)
+    # 从 TOML 子表读取字典；st.secrets["GCP_SERVICE_ACCOUNT_JSON"] 本身就是一个 dict-like
+    service_account_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
 
-    # 2) 读取表 ID
-    sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "").strip()
-    if not sheet_id:
-        st.error("❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。")
-        st.stop()
-
-    # 3) 创建凭证
+    # 2) 创建凭证
     creds = Credentials.from_service_account_info(
         service_account_info,
         scopes=SCOPES,
     )
+
+    # 3) 读取表 ID（就是你那串 1cEtxJ...）
+    sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "").strip()
+    if not sheet_id:
+        st.sidebar.error(
+            f"❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。\n"
+            f"当前 secrets keys: {secrets_keys}"
+        )
+        st.stop()
 
     # 4) 连接 Google Sheets
     client = gspread.authorize(creds)
@@ -73,6 +82,7 @@ def get_gsheet_worksheet():
     return ws
 
 
+@st.cache_data
 def load_log() -> pd.DataFrame:
     """
     从 Google Sheet 读取全部日志数据。
@@ -99,12 +109,12 @@ def load_log() -> pd.DataFrame:
         return pd.DataFrame(columns=base_cols)
 
     df = pd.DataFrame.from_records(records)
-
-    # 确保这些列都存在
+    # 补齐缺失列
     for c in base_cols:
         if c not in df.columns:
             df[c] = pd.NA
 
+    # 统一日期格式
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
