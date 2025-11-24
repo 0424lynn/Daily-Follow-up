@@ -151,7 +151,7 @@ def save_single_entry(entry: dict):
     ]
 
     ws.append_row(row)
-
+    st.cache_data.clear()
 
 def delete_record(idx_in_df: int):
     """
@@ -164,6 +164,7 @@ def delete_record(idx_in_df: int):
     try:
         sheet_row = int(idx_in_df) + 2  # +1 因为 index 从 0；再 +1 跳过表头
         ws.delete_rows(sheet_row)
+        st.cache_data.clear()
     except Exception as e:
         st.warning(f"删除记录时出错：{e}")
 
