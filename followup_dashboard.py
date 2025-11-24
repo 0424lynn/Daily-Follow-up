@@ -62,8 +62,6 @@ def get_gsheet_worksheet():
             ]
         )
     return ws
-
-
 @st.cache_data
 def load_log() -> pd.DataFrame:
     """
@@ -74,10 +72,10 @@ def load_log() -> pd.DataFrame:
     ws = get_gsheet_worksheet()
     try:
         records = ws.get_all_records()  # 每行是一个 dict（自动跳过表头行）
-    except Exception:
+    except Exception as e:
+        st.sidebar.error(f"读取 Google Sheet 失败：{e}")
         records = []
 
-    # 如果还没有任何数据行，返回一个“有列名但没有行”的空表，避免 KeyError
     base_cols = [
         "date",
         "group",
@@ -88,12 +86,16 @@ def load_log() -> pd.DataFrame:
         "score",
     ]
 
+    # 👉 调试信息：看一下实际读到了几条记录
+    st.sidebar.info(f"📄 Google Sheet 读取到 {len(records)} 条记录")
+
+    # 没有任何数据行：返回“有列名但 0 行”的空 df
     if not records:
         return pd.DataFrame(columns=base_cols)
 
-    df = pd.DataFrame(records)
+    df = pd.DataFrame.from_records(records)
 
-    # 万一列名不全，缺哪个补哪个
+    # 万一某些列缺失，补上
     for c in base_cols:
         if c not in df.columns:
             df[c] = pd.NA
