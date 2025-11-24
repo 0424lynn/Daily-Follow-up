@@ -3,7 +3,6 @@
 # 记录每个组、每个跟单员的每日跟进情况，并可视化趋势
 
 from datetime import date, datetime
-
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -25,38 +24,64 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 @st.cache_resource
 def get_gsheet_worksheet():
-    # 调试：看看当前到底有哪些 secrets key
-    st.sidebar.write("Secrets keys:", list(st.secrets.keys()))
-
+    """
+    从 Streamlit secrets 读取 GCP service account 和 Sheet ID，
+    返回名为 'log' 的 worksheet（没有就自动创建并写表头）
+    """
+    # 1) 取出 service account 的 JSON 字符串
     try:
-        sa_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+        raw_json = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     except KeyError:
         st.error(
-            f"❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。当前 secrets keys: {list(st.secrets.keys())}"
+            f"❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。"
+            f" 当前 secrets keys: {list(st.secrets.keys())}"
         )
         st.stop()
 
+    # 2) 如果是字符串（我们现在就是字符串），用 json.loads 变成 dict
+    if isinstance(raw_json, str):
+        service_account_info = json.loads(raw_json)
+    else:
+        # 兼容以后你改成 TOML 对象的情况
+        service_account_info = dict(raw_json)
+
+    # 3) 生成凭证
+    creds = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=SCOPES,
+    )
+
+    # 4) 取 Sheet ID
     try:
         sheet_id = st.secrets["GSHEET_SPREADSHEET_ID"]
     except KeyError:
         st.error(
-            f"❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。当前 secrets keys: {list(st.secrets.keys())}"
+            f"❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。"
+            f" 当前 secrets keys: {list(st.secrets.keys())}"
         )
         st.stop()
 
-    creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
+    # 5) 连接 Google Sheet
     client = gspread.authorize(creds)
     sh = client.open_by_key(sheet_id)
 
+    # 6) 获取 / 创建 "log" 工作表
     try:
         ws = sh.worksheet("log")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="log", rows=1000, cols=7)
         ws.append_row(
-            ["date", "group", "member",
-             "incident_number", "tech_followup",
-             "custom_followup", "score"]
+            [
+                "date",
+                "group",
+                "member",
+                "incident_number",
+                "tech_followup",
+                "custom_followup",
+                "score",
+            ]
         )
+
     return ws
 
 
