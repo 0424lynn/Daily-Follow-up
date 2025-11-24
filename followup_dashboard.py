@@ -21,63 +21,6 @@ st.title("📊 跟单组监督系统（Daily Follow-up Tracker）")
 
 # ================== 0.1 Google Sheet 存储配置 ==================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-@st.cache_data
-def get_gsheet_worksheet():
-    """
-    初始化 Google Sheets 连接，并返回一个叫 'log' 的工作表。
-    第一次运行时，如果没有这个工作表，会自动创建并写入表头。
-    """
-
-    # 1) 从 secrets 里读取 service account 配置（推荐用 TOML 表，而不是 JSON 字符串）
-    if "GCP_SERVICE_ACCOUNT_JSON" not in st.secrets:
-        st.sidebar.error("❌ 未找到 GCP_SERVICE_ACCOUNT_JSON，请到 Settings → Secrets 配置。")
-        st.stop()
-
-    sa_conf = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
-
-    # st.secrets 里可能是 Mapping，也可能是字符串，这里两种都兼容一下
-    if isinstance(sa_conf, str):
-        # 如果你仍然用 JSON 字符串，就在这里解析
-        import json as _json
-        service_account_info = _json.loads(sa_conf)
-    else:
-        # 如果是 TOML 表（推荐），st.secrets 返回的是类似字典的对象
-        service_account_info = dict(sa_conf)
-
-    # 2) 读表 ID
-    sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "").strip()
-    if not sheet_id:
-        st.sidebar.error("❌ 未找到 GSHEET_SPREADSHEET_ID，请到 Settings → Secrets 配置。")
-        st.stop()
-
-    # 3) 创建凭证
-    creds = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=SCOPES,
-    )
-
-    # 4) 连接 Google Sheets
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(sheet_id)
-
-    # 5) 尝试获取名为 "log" 的工作表，没有就创建
-    try:
-        ws = sh.worksheet("log")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="log", rows=1000, cols=7)
-        ws.append_row(
-            [
-                "date",
-                "group",
-                "member",
-                "incident_number",
-                "tech_followup",
-                "custom_followup",
-                "score",
-            ]
-        )
-    return ws
 @st.cache_data
 def load_log() -> pd.DataFrame:
     """
@@ -101,6 +44,9 @@ def load_log() -> pd.DataFrame:
         "custom_followup",
         "score",
     ]
+
+    # 👉 调试信息：看一下实际读到了几条记录
+    st.sidebar.info(f"📄 Google Sheet 读取到 {len(records)} 条记录")
 
     # 没有任何数据行：返回“有列名但 0 行”的空 df
     if not records:
